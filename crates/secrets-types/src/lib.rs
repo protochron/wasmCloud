@@ -115,7 +115,7 @@ pub struct Secret {
     pub binary_secret: Option<Vec<u8>>,
 }
 
-trait SecretsAPI {
+pub trait SecretsAPI {
     // Returns the secret value for the given secret name
     async fn get(
         &self,
