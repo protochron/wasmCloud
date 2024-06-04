@@ -7303,6 +7303,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmcloud-secrets-types"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "nkeys 0.4.1",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wascap 0.15.0",
+]
+
+[[package]]
 name = "wasmcloud-test-util"
 version = "0.2.0"
 dependencies = [
