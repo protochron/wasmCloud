@@ -31,7 +31,7 @@ pub struct Application {
 
 impl Context {
     /// Validates that the underlying claims embedded in the Context's JWTs are valid.
-    pub async fn valid_claims(&self) -> Result<(), ContextValidationError> {
+    pub fn valid_claims(&self) -> Result<(), ContextValidationError> {
         let component_valid = Self::valid_component(&self.entity_jwt);
         let provider_valid = Self::valid_provider(&self.entity_jwt);
         if component_valid.is_err() && provider_valid.is_err() {

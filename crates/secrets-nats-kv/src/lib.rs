@@ -1,7 +1,7 @@
 use anyhow::ensure;
 use async_nats::jetstream::{
     self,
-    kv::{Config, Entry, History},
+    kv::{Config, Entry, History, Store},
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -43,6 +43,12 @@ impl From<u64> for PutSecretResponse {
 impl Api {
     fn queue_name(&self) -> String {
         format!("{}.{}", self.queue_base, self.name)
+    }
+
+    async fn state_bucket(&self) -> anyhow::Result<Store> {
+        let name = format!("SECRETS_{}_state", self.name);
+        let js = jetstream::new(self.client.clone());
+        js.get_key_value(&name).await.map_err(|e| e.into())
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -168,9 +174,7 @@ impl Api {
                         }
                     };
 
-                    let response = self
-                        .get(&secret_req.name, secret_req.version, secret_req.context)
-                        .await;
+                    let response = self.get(secret_req).await;
                     match response {
                         Ok(resp) => {
                             let encoded = serde_json::to_vec(&resp).unwrap();
@@ -400,28 +404,16 @@ impl Api {
 
 #[async_trait]
 impl SecretsAPI for Api {
-    async fn get(
-        &self,
-        // The name of the secret
-        secret_name: &str,
-        // The version of the secret
-        version: Option<String>,
-        // The context of the requestor
-        context: Context,
-    ) -> Result<SecretResponse, GetSecretError> {
+    async fn get(&self, request: SecretRequest) -> Result<SecretResponse, GetSecretError> {
         // First validate the entity JWT
-        if valid_component(&context.entity_jwt).is_err()
-            && valid_provider(&context.entity_jwt).is_err()
-        {
-            let err = valid_component(&context.entity_jwt).unwrap_err();
-            error!(error=%err, "failed to validate");
-            return Err(GetSecretError::InvalidEntityJWT(err.to_string()));
+        if let Err(e) = request.context.valid_claims() {
+            return Err(GetSecretError::InvalidEntityJWT(e.to_string()));
         }
 
         // Next, validate the host JWT
-        let host_claims: Claims<Host> = Claims::decode(&context.host_jwt)
+        let host_claims: Claims<Host> = Claims::decode(&request.context.host_jwt)
             .map_err(|e| GetSecretError::InvalidEntityJWT(e.to_string()))?;
-        if let Err(e) = validate_token::<Host>(&context.host_jwt) {
+        if let Err(e) = validate_token::<Host>(&request.context.host_jwt) {
             return Err(GetSecretError::InvalidHostJWT(e.to_string()));
         };
 
@@ -433,13 +425,13 @@ impl SecretsAPI for Api {
 
         // Now that we have established both JWTs are valid, we can go ahead and retrieve the
         // secret
-        let claims: Claims<Component> = Claims::decode(&context.entity_jwt)
+        let claims: Claims<Component> = Claims::decode(&request.context.entity_jwt)
             .map_err(|e| GetSecretError::InvalidEntityJWT(e.to_string()))?;
         let subject = claims.subject;
         let mapping = self.secrets_mapping.read().await;
         let map = mapping.get(&subject).ok_or(GetSecretError::Unauthorized)?;
 
-        if !map.contains(secret_name) {
+        if !map.contains(&request.name) {
             return Err(GetSecretError::Unauthorized);
         }
 
@@ -449,18 +441,18 @@ impl SecretsAPI for Api {
             .await
             .map_err(|e| GetSecretError::UpstreamError(e.to_string()))?;
 
-        let entry = match version {
+        let entry = match &request.version {
             Some(v) => {
                 let revision = str::parse::<u64>(&v).unwrap();
 
                 let mut key_hist = secrets
-                    .history(secret_name)
+                    .history(&request.name)
                     .await
                     .map_err(|e| GetSecretError::UpstreamError(e.to_string()))?;
                 find_key_rev(&mut key_hist, revision).await
             }
             None => secrets
-                .entry(secret_name)
+                .entry(&request.name)
                 .await
                 .map_err(|e| GetSecretError::UpstreamError(e.to_string()))?,
         };
@@ -502,31 +494,6 @@ impl SecretsAPI for Api {
         let xkey = XKey::from_public_key(self.server_xkey.public_key().as_str()).unwrap();
         xkey
     }
-}
-
-fn valid_component(token: &str) -> anyhow::Result<()> {
-    let v = validate_token::<Component>(token)?;
-    ensure!(!v.expired, "token expired at `{}`", v.expires_human);
-    ensure!(
-        !v.cannot_use_yet,
-        "token cannot be used before `{}`",
-        v.not_before_human
-    );
-    ensure!(v.signature_valid, "signature is not valid");
-    Ok(())
-}
-
-fn valid_provider(token: &str) -> anyhow::Result<()> {
-    let v = validate_token::<CapabilityProvider>(token)?;
-    ensure!(!v.expired, "token expired at `{}`", v.expires_human);
-    ensure!(
-        !v.cannot_use_yet,
-        "token cannot be used before `{}`",
-        v.not_before_human
-    );
-    ensure!(v.signature_valid, "signature is not valid");
-
-    Ok(())
 }
 
 async fn find_key_rev<'a>(h: &mut History, revision: u64) -> Option<Entry> {
