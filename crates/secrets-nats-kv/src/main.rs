@@ -1,6 +1,6 @@
 use clap::Parser;
-use nats_kv_secrets::Api;
 use nkeys::XKey;
+use secrets_nats_kv::Api;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -12,10 +12,12 @@ struct Args {
     name: Option<String>,
     #[arg(short = 'b', long)]
     secrets_bucket: String,
-    #[arg(long, default = "64")]
+    #[arg(long, default_value = "64")]
     max_secret_history: usize,
     #[arg(long)]
     nats_creds_path: Option<String>,
+    #[arg(long, default_value = "wasmcloud_secrets")]
+    nats_queue_base: String,
 }
 
 #[tokio::main]
@@ -40,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         name,
         args.secrets_bucket,
         args.max_secret_history,
+        args.nats_queue_base,
     );
     api.run().await
 }

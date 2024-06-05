@@ -3,152 +3,17 @@ use async_nats::jetstream::{
     self,
     kv::{Config, Entry, History},
 };
-use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use nkeys::XKey;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
-use wascap::jwt::{CapabilityProvider, Host, TokenValidation};
+use wascap::jwt::{CapabilityProvider, Host};
 use wascap::prelude::{validate_token, Claims, Component};
 
-mod types;
-
-pub const WASMCLOUD_HOST_XKEY: &str = "Wasmcloud-Host-Xkey";
-
-#[derive(Serialize, Deserialize)]
-pub struct Context {
-    // The component or provider's signed JWT.
-    pub entity_jwt: String,
-
-    // TODO: think more about this. We can sign it with the host's public key, but I don't think
-    // that actually buys us anything other than validating that the payload is signed by something
-    // that has a nkey.
-    // It also means that ex. a vault backend needs to consume both of these JWTs and mint an
-    // intermediate one that merges the claims from both, which is tricky unless we create
-    // per-connection JWTs for the vault backend. That's probably the most secure way to handle it,
-    // but does that actually compromise the assumptions we're making?
-    //
-    // Scenario: App1 consists of a Postgres provider and a component connected to it, same as
-    // App2. Both are deployed to different lattices, and therefore are operating in _different
-    // security domains_. The Postgres provider is the same in both cases, but the components may
-    // be different (or the same, it really doesn't matter). Problem: you want to write a policy
-    // where App1 wouldn't be able to ever be deployed in a way where it could accidentally access
-    // secrets meant for App2 _if you were to set them that way in a manifest_.
-    // The only way I can see to prevent that (in vault) would be to bind the JWT backend to a set
-    // of claims that includes runtime context information such as the lattice id and host labels.
-    // The problem there is that we don't have a signed, verifiable place to originate that, and
-    // even if we did, we still need to issue a new JWT from the secrets backend that merges the
-    // claims from both the build context (component or provider claims) and the runtime context
-    // (effectively host claims).
-    //
-    // What we _can_ do is add an additional api alongside whatever handles the lattice API auth
-    // callout flow that dispenses a signed JWT for a host issued by it's account key. That JWT
-    // would include the host labels and other metadata. The host itself could mint a HostInfo jwt
-    // as outlined below with the host labels and lattice id, and then the secrets backend could
-    // verify that the host was issued by a known account key by presenting it's signed copy of the
-    // host JWT.
-    pub host_jwt: String,
-    // TODO how in the world do we verify this?
-    //pub application_name: String,
-}
-
-impl Context {
-    pub async fn valid_host_claim(&self) {}
-}
-
-/// Duplicate of the HostInfo struct in the wasmcloud host crate
-#[derive(Serialize, Deserialize)]
-pub struct HostInfo {
-    /// The public key ID of the host
-    #[serde(rename = "publicKey")]
-    pub public_key: String,
-    /// The name of the lattice the host is running in
-    pub lattice: String,
-    /// The labels associated with the host
-    pub labels: HashMap<String, String>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SecretRequest {
-    // The name of the secret
-    pub name: String,
-    // The version of the secret
-    pub version: Option<String>,
-    pub context: Context,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct Secret {
-    pub name: String,
-    pub version: String,
-    pub string_secret: Option<String>,
-    pub binary_secret: Option<Vec<u8>>,
-}
-
-#[derive(Error, Debug, Serialize, Deserialize)]
-enum GetSecretError {
-    #[error("Invalid Entity JWT: {0}")]
-    InvalidEntityJWT(String),
-    #[error("Invalid Host JWT: {0}")]
-    InvalidHostJWT(String),
-    #[error("Secret not found")]
-    SecretNotFound,
-    #[error("Invalid XKey")]
-    InvalidXKey,
-    #[error("Error encrypting secret")]
-    EncryptionError,
-    #[error("Error decrypting secret")]
-    DecryptionError,
-    #[error("Error fetching secret: {0}")]
-    UpstreamError(String),
-    #[error("Error fetching secret: unauthorized")]
-    Unauthorized,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct SecretResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret: Option<Secret>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<GetSecretError>,
-}
-
-impl From<GetSecretError> for SecretResponse {
-    fn from(e: GetSecretError) -> Self {
-        SecretResponse {
-            error: Some(e),
-            ..Default::default()
-        }
-    }
-}
-
-impl From<SecretResponse> for Bytes {
-    fn from(resp: SecretResponse) -> Self {
-        let encoded = serde_json::to_vec(&resp).unwrap();
-        Bytes::from(encoded)
-    }
-}
-
-trait SecretsAPI {
-    // Returns the secret value for the given secret name
-    async fn get(
-        &self,
-        // The name of the secret
-        secret_name: &str,
-        // The version of the secret
-        version: Option<String>,
-        // The context of the requestor
-        context: Context,
-    ) -> Result<SecretResponse, GetSecretError>;
-    // Returns the server's public XKey
-    fn server_xkey(&self) -> XKey;
-}
-
-// Internal types
+use wasmcloud_secrets_types::*;
 
 pub struct Api {
     // The server's public XKey
@@ -160,14 +25,8 @@ pub struct Api {
     pub bucket: String,
     secrets_mapping: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     max_secret_history: usize,
+    queue_base: String,
 }
-
-//#[derive(Serialize, Deserialize, Ord, PartialOrd, Eq, PartialEq, Debug)]
-//pub struct MappingKey {
-//    entity: String,
-//    #[serde(default)]
-//    labels: std::collections::BTreeSet<String>,
-//}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PutSecretResponse {
@@ -181,12 +40,19 @@ impl From<u64> for PutSecretResponse {
 }
 
 impl Api {
+    fn queue_name(&self) -> String {
+        format!("{}.{}", self.queue_base, self.name)
+    }
+
     pub async fn run(&self) -> anyhow::Result<()> {
+        let queue_name = self.queue_name();
         let subject = format!("{}.{}.>", &self.subject_base, self.name);
         info!(subject, "Starting listener");
-        // TODO: queue subscribe
         // TODO: version the subject
-        let mut sub = self.client.subscribe(subject.clone()).await?;
+        let mut sub = self
+            .client
+            .queue_subscribe(subject.clone(), queue_name)
+            .await?;
 
         let js = jetstream::new(self.client.clone());
         let _store = match js.get_key_value(&self.bucket).await {
@@ -515,6 +381,7 @@ impl Api {
         name: String,
         bucket: String,
         max_secret_history: usize,
+        queue_base: String,
     ) -> Self {
         Self {
             server_xkey,
@@ -525,6 +392,7 @@ impl Api {
             bucket,
             secrets_mapping: Arc::new(RwLock::new(HashMap::new())),
             max_secret_history,
+            queue_base,
         }
     }
 }
@@ -582,6 +450,7 @@ impl SecretsAPI for Api {
         let entry = match version {
             Some(v) => {
                 let revision = str::parse::<u64>(&v).unwrap();
+
                 let mut key_hist = secrets
                     .history(secret_name)
                     .await
@@ -658,7 +527,7 @@ fn valid_provider(token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn find_key_rev(h: &mut History, revision: u64) -> Option<Entry> {
+async fn find_key_rev<'a>(h: &mut History, revision: u64) -> Option<Entry> {
     while let Some(entry) = h.next().await {
         if let Ok(entry) = entry {
             if entry.revision == revision {

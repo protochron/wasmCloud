@@ -1,11 +1,14 @@
 use std::collections::HashSet;
 
 use async_nats::{jetstream, Client};
-use nats_kv_secrets::{Api, Context, PutSecretResponse, Secret, SecretRequest, SecretResponse};
 use nkeys::{KeyPair, XKey};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use secrets_nats_kv::{Api, PutSecretResponse};
 use std::collections::HashMap;
 use wascap::jwt::{Claims, ClaimsBuilder, Component, Host};
+use wasmcloud_secrets_types::{
+    Context, Secret, SecretRequest, SecretResponse, WASMCLOUD_HOST_XKEY,
+};
 
 const SUBJECT_BASE: &str = "kvstore_test";
 const NAME_BASE: &str = "nats-kv";
@@ -101,10 +104,7 @@ async fn test_kvstore_put_secret() -> anyhow::Result<()> {
     let base_sub = format!("{}.{}", SUBJECT_BASE, name);
 
     let mut headers = async_nats::HeaderMap::new();
-    headers.insert(
-        nats_kv_secrets::WASMCLOUD_HOST_XKEY,
-        request_key.public_key().as_str(),
-    );
+    headers.insert(WASMCLOUD_HOST_XKEY, request_key.public_key().as_str());
 
     let resp = client
         .request_with_headers(format!("{base_sub}.put_secret"), headers.clone(), v.into())
@@ -205,10 +205,7 @@ async fn test_kvstore_version() -> anyhow::Result<()> {
     let base_sub = format!("{}.{}", SUBJECT_BASE, name);
 
     let mut headers = async_nats::HeaderMap::new();
-    headers.insert(
-        nats_kv_secrets::WASMCLOUD_HOST_XKEY,
-        request_key.public_key().as_str(),
-    );
+    headers.insert(WASMCLOUD_HOST_XKEY, request_key.public_key().as_str());
 
     let resp = client
         .request_with_headers(
@@ -312,6 +309,7 @@ fn setup_api(client: Client, enc_seed: String, server_seed: String) -> (Api, Str
             name.clone(),
             name.clone(),
             64,
+            "wasmcloud_secrets_test".to_string(),
         ),
         name,
     )
