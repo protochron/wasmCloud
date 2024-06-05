@@ -123,46 +123,11 @@ pub struct Secret {
     pub binary_secret: Option<Vec<u8>>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub enum KeyType {
-    Ed25519,
-    /// Really just a synonym for Ed25519, but indicates that we should try and verify that the
-    /// account is signed by known operator key (if possible).
-    NKey,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Signer {
-    pub public_key: String,
-    pub key_type: KeyType,
-}
-
 #[async_trait]
 pub trait SecretsAPI {
     // Returns the secret value for the given secret name
-    async fn get(
-        &self,
-        // The name of the secret
-        secret_name: &str,
-        // The version of the secret
-        version: Option<String>,
-        // The context of the requestor
-        context: Context,
-    ) -> Result<SecretResponse, GetSecretError>;
+    async fn get(&self, request: SecretRequest) -> Result<SecretResponse, GetSecretError>;
 
     // Returns the server's public XKey
     fn server_xkey(&self) -> XKey;
-
-    /// Adds a signer for an entity (component or provider).
-    /// This allows us to verify that a component or provider was signed by a known key.
-    async fn add_entity_signer(
-        &self,
-        entity_id: String,
-        signer: Signer,
-    ) -> Result<(), AddSignerError>;
-
-    /// Removes a signer for an entity (component or provider).
-    /// Assumption: an entity only ever has one signer. Replacing it involves removing the old
-    /// signer and adding a new one.
-    async fn remove_entity_signer(&self, entity_id: String) -> Result<(), RemoveSignerError>;
 }

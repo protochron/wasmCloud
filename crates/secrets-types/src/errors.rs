@@ -36,18 +36,6 @@ pub enum GetSecretError {
     Other(String),
 }
 
-#[derive(Error, Debug, Serialize, Deserialize)]
-pub enum AddSignerError {
-    #[error("Error adding signer: {0}")]
-    AddSignerError(String),
-}
-
-#[derive(Error, Debug, Serialize, Deserialize)]
-pub enum RemoveSignerError {
-    #[error("Error removing signer: {0}")]
-    RemoveSignerError(String),
-}
-
 impl From<GetSecretError> for SecretResponse {
     fn from(e: GetSecretError) -> Self {
         SecretResponse {
