@@ -13,6 +13,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true, default-features = true }
 #async-nats = { workspace = true, default-features = true }
 async-nats = "0.35"
+async-trait = { workspace = true }
 bytes = { workspace = true}
 clap = { workspace = true, default-features = true, features = ["derive"] }
 futures = { workspace = true }

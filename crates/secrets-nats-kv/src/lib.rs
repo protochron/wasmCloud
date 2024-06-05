@@ -3,6 +3,7 @@ use async_nats::jetstream::{
     self,
     kv::{Config, Entry, History},
 };
+use async_trait::async_trait;
 use futures::StreamExt;
 use nkeys::XKey;
 use serde::{Deserialize, Serialize};
@@ -397,6 +398,7 @@ impl Api {
     }
 }
 
+#[async_trait]
 impl SecretsAPI for Api {
     async fn get(
         &self,

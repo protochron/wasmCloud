@@ -147,6 +147,7 @@ async fn test_kvstore_put_secret() -> anyhow::Result<()> {
         context: Context {
             entity_jwt: encoded,
             host_jwt: claims.encode(&account)?,
+            application: None,
         },
         version: None,
     };
@@ -259,6 +260,7 @@ async fn test_kvstore_version() -> anyhow::Result<()> {
         context: Context {
             entity_jwt: encoded,
             host_jwt: claims.encode(&account)?,
+            application: None,
         },
         version: Some("1".to_string()),
     };

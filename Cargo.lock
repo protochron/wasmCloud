@@ -5022,6 +5022,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats 0.35.1",
+ "async-trait",
  "bytes",
  "clap",
  "futures",

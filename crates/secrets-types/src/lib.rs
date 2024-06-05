@@ -1,24 +1,36 @@
 use anyhow::ensure;
+use async_trait::async_trait;
 use nkeys::XKey;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use wascap::jwt::{validate_token, CapabilityProvider, Component, Host};
 
 mod errors;
 pub use crate::errors::*;
 
+/// The key of a NATS header containing the wasmCloud host's public xkey used to encrypt a secret request.
+/// It is also used to encrypt the response so that only the requestor can decrypt it.
 pub const WASMCLOUD_HOST_XKEY: &str = "WasmCloud-Host-Xkey";
 
 /// The request context for retrieving a secret
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct Context {
     /// The component or provider's signed JWT.
     pub entity_jwt: String,
     /// The host's signed JWT.
     pub host_jwt: String,
+    /// The application the entity belongs to.
+    /// TODO: should this also be a JWT, but signed by the host?
+    pub application: Option<Application>,
+}
+
+/// The application that the entity belongs to.
+#[derive(Serialize, Deserialize)]
+pub struct Application {
+    pub name: String,
 }
 
 impl Context {
+    /// Validates that the underlying claims embedded in the Context's JWTs are valid.
     pub async fn valid_claims(&self) -> Result<(), ContextValidationError> {
         let component_valid = Self::valid_component(&self.entity_jwt);
         let provider_valid = Self::valid_provider(&self.entity_jwt);
@@ -78,26 +90,11 @@ impl Context {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
-pub struct SecretResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret: Option<Secret>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<GetSecretError>,
-}
-
-/// Duplicate of the HostInfo struct in the wasmcloud host crate
-#[derive(Serialize, Deserialize)]
-pub struct HostInfo {
-    /// The public key ID of the host
-    #[serde(rename = "publicKey")]
-    pub public_key: String,
-    /// The name of the lattice the host is running in
-    pub lattice: String,
-    /// The labels associated with the host
-    pub labels: HashMap<String, String>,
-}
-
+/// The request to retrieve a secret. This includes the name of the secret and the context needed
+/// to validate the requestor. The context will be passed to the underlying secrets service in
+/// order to make decisions around access.
+/// The version field is optional but highly recommended. If it is not provided, the service will
+/// default to retrieving the latest version of the secret.
 #[derive(Serialize, Deserialize)]
 pub struct SecretRequest {
     // The name of the secret
@@ -107,6 +104,17 @@ pub struct SecretRequest {
     pub context: Context,
 }
 
+/// The response to a secret request. The fields are mutually exclusive: either a secret or an
+/// error will be set.
+#[derive(Serialize, Deserialize, Default)]
+pub struct SecretResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<Secret>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<GetSecretError>,
+}
+
+/// A secret that can be either a string or binary value.
 #[derive(Serialize, Deserialize, Default)]
 pub struct Secret {
     pub name: String,
@@ -115,6 +123,21 @@ pub struct Secret {
     pub binary_secret: Option<Vec<u8>>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub enum KeyType {
+    Ed25519,
+    /// Really just a synonym for Ed25519, but indicates that we should try and verify that the
+    /// account is signed by known operator key (if possible).
+    NKey,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Signer {
+    pub public_key: String,
+    pub key_type: KeyType,
+}
+
+#[async_trait]
 pub trait SecretsAPI {
     // Returns the secret value for the given secret name
     async fn get(
@@ -126,6 +149,20 @@ pub trait SecretsAPI {
         // The context of the requestor
         context: Context,
     ) -> Result<SecretResponse, GetSecretError>;
+
     // Returns the server's public XKey
     fn server_xkey(&self) -> XKey;
+
+    /// Adds a signer for an entity (component or provider).
+    /// This allows us to verify that a component or provider was signed by a known key.
+    async fn add_entity_signer(
+        &self,
+        entity_id: String,
+        signer: Signer,
+    ) -> Result<(), AddSignerError>;
+
+    /// Removes a signer for an entity (component or provider).
+    /// Assumption: an entity only ever has one signer. Replacing it involves removing the old
+    /// signer and adding a new one.
+    async fn remove_entity_signer(&self, entity_id: String) -> Result<(), RemoveSignerError>;
 }
