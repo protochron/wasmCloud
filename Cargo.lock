@@ -7365,6 +7365,7 @@ name = "wasmcloud-secrets-types"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "nkeys 0.4.1",
  "serde",
