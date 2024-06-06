@@ -25,10 +25,13 @@ impl Drop for Suite {
             rt.block_on(async {
                 let client = async_nats::connect("127.0.0.1:4222").await.unwrap();
                 let js = jetstream::new(client.clone());
-                js.delete_key_value(format!("SECRETS_{}_state", name))
+                js.delete_key_value(format!("SECRETS_{}_state", name.clone()))
                     .await
                     .unwrap();
-                js.delete_key_value(name).await.unwrap();
+                js.delete_key_value(name.clone()).await.unwrap();
+                js.delete_stream(format!("SECRETS_{}_state_lock", name.clone()))
+                    .await
+                    .unwrap();
             });
         })
         .join()
