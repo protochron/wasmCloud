@@ -138,6 +138,7 @@ wasmcloud-tracing = { workspace = true, features = ["otel"] }
 async-nats = { workspace = true, features = ["ring"] }
 bytes = { workspace = true }
 base64 = { workspace = true }
+criterion = { workspace = true, features = ["cargo_bench_support", "async_tokio", "html_reports"] }
 futures = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
@@ -160,6 +161,7 @@ serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 test-components = { workspace = true }
+testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 tokio-stream = { workspace = true }
 tracing-subscriber = { workspace = true, features = [
@@ -182,6 +184,10 @@ wasmcloud-test-util = { workspace = true }
 wrpc-interface-http = { workspace = true, features = ["hyper"] }
 wrpc-transport = { workspace = true }
 wrpc-transport-nats = { workspace = true }
+
+[[bench]]
+name = "benchmarks"
+harness = false
 
 [workspace]
 members = ["crates/*"]
@@ -220,6 +226,7 @@ cloudevents-sdk = { version = "0.7", default-features = false }
 command-group = { version = "5", default-features = false }
 config = { version = "0.13", default-features = false }
 console = { version = "0.15", default-features = false }
+criterion = { version = "0.5", default-features = false }
 crossterm = { version = "0.28.1", default-features = false }
 data-encoding = { version = "2", default-features = false }
 deadpool-postgres = { version = "0.13", default-features = false }
