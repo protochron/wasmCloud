@@ -185,10 +185,6 @@ wrpc-interface-http = { workspace = true, features = ["hyper"] }
 wrpc-transport = { workspace = true }
 wrpc-transport-nats = { workspace = true }
 
-[[bench]]
-name = "benchmarks"
-harness = false
-
 [workspace]
 members = ["crates/*"]
 
