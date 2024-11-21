@@ -10,7 +10,7 @@ use anyhow::{ensure, Context as _};
 use futures::{Stream, TryStreamExt as _};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::mpsc;
-use tracing::{debug, instrument, warn, Instrument as _, Span};
+use tracing::{debug, info_span, instrument, warn, Instrument as _, Span};
 use wascap::jwt;
 use wascap::wasm::extract_claims;
 use wasi_preview1_component_adapter_provider::{
@@ -471,7 +471,7 @@ where
     }
 
     /// [Claims](jwt::Claims) associated with this [Component].
-    #[instrument(level = "trace")]
+    //#[instrument(level = "trace")]
     pub fn claims(&self) -> Option<&jwt::Claims<jwt::Component>> {
         self.claims.as_ref()
     }
@@ -482,7 +482,8 @@ where
     /// A [`WrpcServeEvent`] containing the incoming [`wrpc_transport::Serve::Context`] will be sent
     /// on completion of each invocation.
     /// The supplied [`Handler`] will be used to satisfy imports.
-    #[instrument(level = "debug", skip_all)]
+    //#[instrument(level = "debug", skip_all)]
+    #[allow(clippy::too_many_lines)]
     pub async fn serve_wrpc<S>(
         &self,
         srv: &S,
@@ -492,7 +493,7 @@ where
     where
         S: wrpc_transport::Serve,
     {
-        let span = Span::current();
+        //let span = Span::current();
         let max_execution_time = self.max_execution_time;
         let mut invocations = vec![];
         let instance = Instance {
@@ -550,28 +551,25 @@ where
                         .await
                         .context("failed to serve root function")?;
                     let events = events.clone();
-                    let span = span.clone();
+                    //let span = span.clone();
                     invocations.push(Box::pin(func.map_ok(move |(cx, res)| {
                         let events = events.clone();
-                        Box::pin(
-                            async move {
-                                let res = res.await;
-                                let success = res.is_ok();
-                                if let Err(err) =
-                                    events.try_send(WrpcServeEvent::DynamicExportReturned {
-                                        context: cx,
-                                        success,
-                                    })
-                                {
-                                    warn!(
-                                        ?err,
-                                        success, "failed to send dynamic root export return event"
-                                    );
-                                }
-                                res
+                        Box::pin(async move {
+                            let res = res.await;
+                            let success = res.is_ok();
+                            if let Err(err) =
+                                events.try_send(WrpcServeEvent::DynamicExportReturned {
+                                    context: cx,
+                                    success,
+                                })
+                            {
+                                warn!(
+                                    ?err,
+                                    success, "failed to send dynamic root export return event"
+                                );
                             }
-                            .instrument(span.clone()),
-                        )
+                            res
+                        })
                             as Pin<Box<dyn Future<Output = _> + Send + 'static>>
                     })));
                 }
@@ -605,7 +603,7 @@ where
                                     .await
                                     .context("failed to serve instance function")?;
                                 let events = events.clone();
-                                let span = span.clone();
+                                //let span = span.clone();
                                 invocations.push(Box::pin(func.map_ok(move |(cx, res)| {
                                     let events = events.clone();
                                     Box::pin(
@@ -625,8 +623,7 @@ where
                                                 );
                                             }
                                             res
-                                        }
-                                        .instrument(span.clone()),
+                                        },
                                     )
                                         as Pin<Box<dyn Future<Output = _> + Send + 'static>>
                                 })));

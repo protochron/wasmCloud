@@ -32,7 +32,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval_at, Instant};
 use tokio::{process, select, spawn};
 use tokio_stream::wrappers::IntervalStream;
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument as _, Span};
 use uuid::Uuid;
 use wascap::{jwt, prelude::ClaimsBuilder};
 use wasmcloud_control_interface::{
@@ -221,13 +221,13 @@ impl wrpc_transport::Serve for WrpcServer {
     type Outgoing = <wrpc_transport_nats::Client as wrpc_transport::Serve>::Outgoing;
     type Incoming = <wrpc_transport_nats::Client as wrpc_transport::Serve>::Incoming;
 
-    #[instrument(
-        level = "info",
-        skip(self, paths),
-        fields(
-            component_id = ?self.id,
-            component_ref = ?self.image_reference)
-    )]
+    //#[instrument(
+    //    level = "info",
+    //    skip(self, paths),
+    //    fields(
+    //        component_id = ?self.id,
+    //        component_ref = ?self.image_reference)
+    //)]
     async fn serve(
         &self,
         instance: &str,
@@ -270,26 +270,8 @@ impl wrpc_transport::Serve for WrpcServer {
             // least has this top level span. If the fields add too much overhead, we can remove
             // those fields instead.
             let span = tracing::info_span!("component_invocation", func = %func, id = %id, instance = %instance);
+            let sp = span.clone();
             async move {
-                let PolicyResponse {
-                    request_id,
-                    permitted,
-                    message,
-                } = policy_manager
-                    .evaluate_perform_invocation(
-                        &id,
-                        &image_reference,
-                        &annotations,
-                        claims.as_deref(),
-                        instance.to_string(),
-                        func.to_string(),
-                    )
-                    .await?;
-                ensure!(
-                    permitted,
-                    "policy denied request to invoke component `{request_id}`: `{message:?}`",
-                );
-
                 if let Some(ref cx) = cx {
                     // TODO: wasmcloud_tracing take HeaderMap for my own sanity
                     // Coerce the HashMap<String, Vec<String>> into a Vec<(String, String)> by
@@ -312,6 +294,28 @@ impl wrpc_transport::Serve for WrpcServer {
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
+
+                //let sp2 = info_span!(parent: sp, "policy_check", func = %func, id = %id, instance = %instance);
+                let PolicyResponse {
+                    request_id,
+                    permitted,
+                    message,
+                } = policy_manager
+                    .evaluate_perform_invocation(
+                        &id,
+                        &image_reference,
+                        &annotations,
+                        claims.as_deref(),
+                        instance.to_string(),
+                        func.to_string(),
+                    ).instrument(sp)
+                    .await?;
+                ensure!(
+                    permitted,
+                    "policy denied request to invoke component `{request_id}`: `{message:?}`",
+                );
+
+
                 Ok((
                     (
                         Instant::now(),
@@ -1231,6 +1235,8 @@ impl Host {
             Some(prefix),
         )
         .await?;
+        let span =
+            tracing::info_span!(parent: None, "serve_wrpc", component_ref = ?image_reference);
         let exports = component
             .serve_wrpc(
                 &WrpcServer {
@@ -1246,6 +1252,7 @@ impl Host {
                 handler.clone(),
                 events_tx,
             )
+            .instrument(span)
             .await?;
         let permits = Arc::new(Semaphore::new(
             usize::from(max_instances).min(Semaphore::MAX_PERMITS),
@@ -1323,8 +1330,7 @@ impl Host {
                         },
                     );
                     debug!("export serving task done");
-                }
-                .in_current_span(),
+                }, //.in_current_span(),
             ),
             annotations: annotations.clone(),
             max_instances,
@@ -1625,6 +1631,7 @@ impl Host {
         let component_id = Arc::from(component_id);
         let component_ref = Arc::from(component_ref);
         // Spawn a task to perform the scaling and possibly an update of the component afterwards
+
         spawn(async move {
             // Fetch the component from the reference
             let component_and_claims =
