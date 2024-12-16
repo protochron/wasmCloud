@@ -13,14 +13,18 @@ use core::str::FromStr;
 
 use std::collections::HashMap;
 use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use aws_config::default_provider::credentials::DefaultCredentialsChain;
 use aws_config::default_provider::region::DefaultRegionChain;
+use aws_config::provider_config::ProviderConfig;
 use aws_config::retry::RetryConfig;
 use aws_config::sts::AssumeRoleProvider;
-use aws_sdk_s3::config::{Region, SharedCredentialsProvider};
+use aws_config::web_identity_token::{StaticConfiguration, WebIdentityTokenCredentialsProvider};
+use aws_config::ConfigLoader;
+use aws_sdk_s3::config::{ProvideCredentials, Region, SharedCredentialsProvider};
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::create_bucket::{CreateBucketError, CreateBucketOutput};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
@@ -39,7 +43,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 use wasmcloud_provider_sdk::core::secrets::SecretValue;
 use wasmcloud_provider_sdk::core::tls;
 use wasmcloud_provider_sdk::{
@@ -82,6 +86,10 @@ pub struct StorageConfig {
     pub aliases: HashMap<String, String>,
     /// Region in which buckets will be created
     pub bucket_region: Option<String>,
+
+    // Optional JWT for authenticating to AWS. This will change the auth call to use the
+    // AssumeRoleWithWebIdentity api.
+    pub web_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -166,71 +174,224 @@ pub struct StorageClient {
     bucket_region: Option<BucketLocationConstraint>,
 }
 
+//async fn get_client(cfg: &StorageConfig) -> Box<dyn ProvideCredentials> {
+//    let region = match cfg.region.clone() {
+//        Some(region) => Some(Region::new(region)),
+//        _ => DefaultRegionChain::builder().build().region().await,
+//    };
+//
+//    if let Some(token_path) = cfg.web_token.clone() {
+//        let role_config = cfg.sts_config.as_ref();
+//
+//        let token_path = PathBuf::from(token_path);
+//        let conf = WebIdentityTokenCredentialsProvider::builder()
+//            .static_configuration(StaticConfiguration {
+//                role_arn: role_config
+//                    .unwrap_or(&StsAssumeRoleConfig::default())
+//                    .role
+//                    .clone(),
+//                session_name: "".to_string(),
+//                web_identity_token_file: token_path,
+//            })
+//            .build();
+//        return Box::new(conf);
+//    } else {
+//        return Box::new(SharedCredentialsProvider::new(
+//            DefaultCredentialsChain::builder()
+//                .region(region)
+//                .build()
+//                .await,
+//        ));
+//    }
+//    // use static credentials or defaults from environment
+//    //match (cfg.access_key_id, cfg.secret_access_key) {
+//    //    (Some(access_key_id), Some(secret_access_key)) => {
+//    //        return SharedCredentialsProvider::new(aws_sdk_s3::config::Credentials::new(
+//    //            access_key_id,
+//    //            secret_access_key,
+//    //            cfg.session_token,
+//    //            None,
+//    //            "static",
+//    //        ))
+//    //    }
+//    //    _ => {
+//    //        return SharedCredentialsProvider::new(
+//    //            DefaultCredentialsChain::builder()
+//    //                .region(region)
+//    //                .build()
+//    //                .await,
+//    //        )
+//    //    }
+//    //}
+//}
+async fn get_web_token_config(cfg: StorageConfig) -> ConfigLoader {
+    info!("using web token config");
+    let region = match cfg.region {
+        Some(region) => Some(Region::new(region)),
+        _ => DefaultRegionChain::builder().build().region().await,
+    };
+
+    let p = PathBuf::from(cfg.web_token.unwrap_or_default());
+    let role_config = cfg.sts_config.as_ref();
+    let conf = WebIdentityTokenCredentialsProvider::builder()
+        .static_configuration(StaticConfiguration {
+            role_arn: role_config
+                .unwrap_or(&StsAssumeRoleConfig::default())
+                .role
+                .clone(),
+            session_name: DEFAULT_STS_SESSION.to_string(),
+            web_identity_token_file: p,
+        })
+        .configure(&ProviderConfig::without_region().with_region(region.clone()))
+        .build();
+
+    let mut retry_config = RetryConfig::standard();
+    if let Some(max_attempts) = cfg.max_attempts {
+        retry_config = retry_config.with_max_attempts(max_attempts);
+    }
+    aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
+        .region(region)
+        .credentials_provider(conf)
+        .retry_config(retry_config)
+}
+
+async fn get_creds_config(cfg: StorageConfig) -> ConfigLoader {
+    let region = match cfg.region {
+        Some(region) => Some(Region::new(region)),
+        _ => DefaultRegionChain::builder().build().region().await,
+    };
+
+    let conf = match (cfg.access_key_id, cfg.secret_access_key) {
+        (Some(access_key_id), Some(secret_access_key)) => {
+            SharedCredentialsProvider::new(aws_sdk_s3::config::Credentials::new(
+                access_key_id,
+                secret_access_key,
+                cfg.session_token,
+                None,
+                "static",
+            ))
+        }
+        _ => SharedCredentialsProvider::new(
+            DefaultCredentialsChain::builder()
+                .region(region.clone())
+                .build()
+                .await,
+        ),
+    };
+    let mut retry_config = RetryConfig::standard();
+    if let Some(max_attempts) = cfg.max_attempts {
+        retry_config = retry_config.with_max_attempts(max_attempts);
+    }
+    aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
+        .region(region)
+        .credentials_provider(conf)
+        .retry_config(retry_config)
+}
+
+async fn get_config(cfg: StorageConfig) -> ConfigLoader {
+    // TODO add assume role config back in
+    if cfg.web_token.is_some() {
+        get_web_token_config(cfg).await
+    } else {
+        get_creds_config(cfg).await
+    }
+}
+
 impl StorageClient {
     pub async fn new(
-        StorageConfig {
-            access_key_id,
-            secret_access_key,
-            session_token,
-            region,
-            max_attempts,
-            sts_config,
-            endpoint,
-            mut aliases,
-            bucket_region,
-        }: StorageConfig,
+        //StorageConfig {
+        //    access_key_id,
+        //    secret_access_key,
+        //    session_token,
+        //    region,
+        //    max_attempts,
+        //    sts_config,
+        //    endpoint,
+        //    mut aliases,
+        //    bucket_region,
+        //    web_token,
+        //}: StorageConfig,
+        mut cfg: StorageConfig,
         config_values: &HashMap<String, String>,
     ) -> Self {
-        let region = match region {
-            Some(region) => Some(Region::new(region)),
-            _ => DefaultRegionChain::builder().build().region().await,
-        };
+        //let region = match cfg.region {
+        //    Some(region) => Some(Region::new(region)),
+        //    _ => DefaultRegionChain::builder().build().region().await,
+        //};
+        //
+        info!(?cfg, "creating storage client");
+
+        let mut loader = get_config(cfg.clone()).await;
 
         // use static credentials or defaults from environment
-        let mut cred_provider = match (access_key_id, secret_access_key) {
-            (Some(access_key_id), Some(secret_access_key)) => {
-                SharedCredentialsProvider::new(aws_sdk_s3::config::Credentials::new(
-                    access_key_id,
-                    secret_access_key,
-                    session_token,
-                    None,
-                    "static",
-                ))
-            }
-            _ => SharedCredentialsProvider::new(
-                DefaultCredentialsChain::builder()
-                    .region(region.clone())
-                    .build()
-                    .await,
-            ),
-        };
-        if let Some(StsAssumeRoleConfig {
-            role,
-            region,
-            session,
-            external_id,
-        }) = sts_config
-        {
-            let mut role = AssumeRoleProvider::builder(role)
-                .session_name(session.unwrap_or_else(|| DEFAULT_STS_SESSION.to_string()));
-            if let Some(region) = region {
-                role = role.region(Region::new(region));
-            }
-            if let Some(external_id) = external_id {
-                role = role.external_id(external_id);
-            }
-            cred_provider = SharedCredentialsProvider::new(role.build().await);
-        }
+        //let mut cred_provider = match (access_key_id, secret_access_key) {
+        //    (Some(access_key_id), Some(secret_access_key)) => {
+        //        SharedCredentialsProvider::new(aws_sdk_s3::config::Credentials::new(
+        //            access_key_id,
+        //            secret_access_key,
+        //            session_token,
+        //            None,
+        //            "static",
+        //        ))
+        //    }
+        //    _ => SharedCredentialsProvider::new(
+        //        DefaultCredentialsChain::builder()
+        //            .region(region.clone())
+        //            .build()
+        //            .await,
+        //    ),
+        //};
+        //let cred_provider = if let Some(token_path) = cfg.web_token {
+        //    let role_config = cfg.sts_config.as_ref();
 
-        let mut retry_config = RetryConfig::standard();
-        if let Some(max_attempts) = max_attempts {
-            retry_config = retry_config.with_max_attempts(max_attempts);
-        }
-        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
-            .region(region)
-            .credentials_provider(cred_provider)
-            .retry_config(retry_config);
-        if let Some(endpoint) = endpoint {
+        //    let token_path = PathBuf::from(token_path);
+        //    let conf = WebIdentityTokenCredentialsProvider::builder()
+        //        .static_configuration(StaticConfiguration {
+        //            role_arn: role_config
+        //                .unwrap_or(&StsAssumeRoleConfig::default())
+        //                .role
+        //                .clone(),
+        //            session_name: "".to_string(),
+        //            web_identity_token_file: token_path,
+        //        })
+        //        .build()
+        //} else {
+        //    SharedCredentialsProvider::new(
+        //        DefaultCredentialsChain::builder()
+        //            .region(region.clone())
+        //            .build()
+        //            .await,
+        //    )
+        //};
+
+        //if let Some(StsAssumeRoleConfig {
+        //    role,
+        //    region,
+        //    session,
+        //    external_id,
+        //}) = sts_config
+        //{
+        //    let mut role = AssumeRoleProvider::builder(role)
+        //        .session_name(session.unwrap_or_else(|| DEFAULT_STS_SESSION.to_string()));
+        //    if let Some(region) = region {
+        //        role = role.region(Region::new(region));
+        //    }
+        //    if let Some(external_id) = external_id {
+        //        role = role.external_id(external_id);
+        //    }
+        //    cred_provider = SharedCredentialsProvider::new(role.build().await);
+        //}
+
+        //let mut retry_config = RetryConfig::standard();
+        //if let Some(max_attempts) = cfg.max_attempts {
+        //    retry_config = retry_config.with_max_attempts(max_attempts);
+        //}
+        //loader = loader.retry_config(retry_config);
+        //let mut loader = aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
+        //    .region(region)
+        //    .credentials_provider(cred_provider)
+        //    .retry_config(retry_config);
+        if let Some(endpoint) = cfg.endpoint {
             loader = loader.endpoint_url(endpoint);
         };
         let s3_client = aws_sdk_s3::Client::from_conf(
@@ -267,15 +428,17 @@ impl StorageClient {
                 if alias.is_empty() || v.is_empty() {
                     error!("invalid bucket alias_ key and value must not be empty");
                 } else {
-                    aliases.insert(alias.to_string(), v.to_string());
+                    cfg.aliases.insert(alias.to_string(), v.to_string());
                 }
             }
         }
 
         StorageClient {
             s3_client,
-            aliases: Arc::new(aliases),
-            bucket_region: bucket_region.and_then(|v| BucketLocationConstraint::from_str(&v).ok()),
+            aliases: Arc::new(cfg.aliases),
+            bucket_region: cfg
+                .bucket_region
+                .and_then(|v| BucketLocationConstraint::from_str(&v).ok()),
         }
     }
 
